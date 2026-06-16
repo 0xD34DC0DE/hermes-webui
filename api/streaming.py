@@ -53,6 +53,15 @@ from api.models import (
 )
 from api.session_ops import mark_session_title_generated, session_has_manual_title
 
+
+def _rough_stream_token_delta(text):
+    text = str(text or '')
+    if not text.strip():
+        return 0
+    if any(ch.isspace() for ch in text):
+        return max(1, len(re.findall(r'\S+', text)))
+    return max(1, (len(text) + 3) // 4)
+
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
 # interleave their os.environ writes. This global lock serializes the env
@@ -5026,10 +5035,10 @@ def _run_agent_streaming(
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] += str(text)
                 put('token', {'text': text})
-                # Update live throughput from stream delta callbacks, not from
-                # byte/character length. If a backend cannot provide live deltas,
-                # the frontend hides TPS rather than showing an estimate.
-                _metering_output_deltas[0] += 1
+                # Update live throughput from streamed text using a rough token
+                # estimate. Counting each callback as one token undercounts chunked
+                # providers and makes the TPS label stick near 1.0.
+                _metering_output_deltas[0] += _rough_stream_token_delta(text)
                 meter().record_token(stream_id, _metering_output_deltas[0])
                 _emit_metering()
 
@@ -5055,8 +5064,8 @@ def _run_agent_streaming(
                 if stream_id in STREAM_REASONING_TEXT:
                     STREAM_REASONING_TEXT[stream_id] += reasoning_delta
                 put('reasoning', {'text': reasoning_delta})
-                # Track reasoning deltas in the meter so live TPS reflects all AI output.
-                _metering_reasoning_deltas[0] += 1
+                # Track reasoning text in the meter so live TPS reflects all AI output.
+                _metering_reasoning_deltas[0] += _rough_stream_token_delta(reasoning_delta)
                 meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
                 _emit_metering()
 
