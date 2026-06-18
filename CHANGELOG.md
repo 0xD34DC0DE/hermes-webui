@@ -21,6 +21,17 @@
   The PID file under `HERMES_WEBUI_STATE_DIR/server.pid` is JSON
   (not raw int) so future fields can be added without breaking
   existing readers.
+- **Out-of-process AIAgent runner server (`api.runner_server`).** AIAgent
+  is now owned by a separate process bound to a distinct port
+  (default 8788 vs WebUI's 8787). The runner exposes the full
+  `/v1/runs` surface — `POST /v1/runs`, `GET /v1/runs/{id}/events`,
+  `cancel`, `respond_approval`, `respond_clarify`, `queue_message`,
+  `update_goal` — exactly matching `api.runner_client.HttpRunnerClient`.
+  Launch via `start-runner.ps1` or `start.ps1 -WithRunner`; the
+  WebUI's runtime-adapter (`HERMES_WEBUI_RUNTIME_ADAPTER=runner-local`)
+  routes chat turns through the runner, so a WebUI restart is
+  transparent to in-flight conversations. New `restart.ps1 -WithRunner`
+  restarts both processes atomically.
 
 ## [v0.51.489] — 2026-06-18 — Release QY (outline button no longer collides with the scroll control)
 
