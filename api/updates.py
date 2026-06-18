@@ -45,6 +45,26 @@ _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@"
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 _QUERY_SECRET_RE = re.compile(r"([?&](?:access_token|token|password|auth|key)=)[^&\s'\"]+", re.IGNORECASE)
 
+# Configurable remote for self-update checks. Default is 'origin' so the
+# upstream install path is unchanged. Operators with a private fork can
+# point the updater at it via HERMES_WEBUI_UPDATE_REMOTE=fork (or any
+# other configured remote name), which makes `git pull --ff-only` resolve
+# against the fork's tracking branch instead of upstream. The
+# `update_check` and `apply_update` paths all read this, so the
+# notification banner, fetch URLs, and pull targets stay consistent.
+_DEFAULT_UPDATE_REMOTE = 'origin'
+
+
+def _update_remote():
+    """Return the remote name used for self-update git operations.
+
+    Reads ``HERMES_WEBUI_UPDATE_REMOTE`` on every call so operators can
+    change it without restarting the WebUI. Falls back to ``'origin'`` if
+    the env var is unset or empty, preserving the upstream install path.
+    """
+    name = os.environ.get('HERMES_WEBUI_UPDATE_REMOTE', '').strip()
+    return name or _DEFAULT_UPDATE_REMOTE
+
 
 def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CHARS) -> str:
     """Return a user-facing git diagnostic with credentials removed.
@@ -403,13 +423,13 @@ def _split_remote_ref(ref):
 
 def _detect_default_branch(path):
     """Detect the remote default branch (master or main)."""
-    out, ok = _run_git(['symbolic-ref', 'refs/remotes/origin/HEAD'], path)
+    out, ok = _run_git(['symbolic-ref', f'refs/remotes/{_update_remote()}/HEAD'], path)
     if ok and out:
         # refs/remotes/origin/master -> master
         return out.split('/')[-1]
     # Fallback: try master, then main
     for branch in ('master', 'main'):
-        _, ok = _run_git(['rev-parse', '--verify', f'origin/{branch}'], path)
+        _, ok = _run_git(['rev-parse', '--verify', f'{_update_remote()}/{branch}'], path)
         if ok:
             return branch
     return 'master'
@@ -518,7 +538,7 @@ def _select_apply_compare_ref(path):
         return upstream
 
     branch = _detect_default_branch(path)
-    return f'origin/{branch}'
+    return f'{_update_remote()}/{branch}'
 
 
 def _check_repo_release(path, name):
@@ -554,7 +574,7 @@ def _check_repo_release(path, name):
     if behind > 0 and not _can_fast_forward_to(path, latest_tag):
         return None
 
-    remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
+    remote_url, _ = _run_git(['remote', 'get-url', _update_remote()], path)
     remote_url = _normalize_remote_url(remote_url)
 
     return {
@@ -575,9 +595,9 @@ def _check_repo_release(path, name):
 def _check_repo_branch(path, name, *, fetch=True):
     """Fallback: check if a git repo is behind its upstream branch."""
 
-    # Fetch latest from origin (network call, cached by TTL)
+    # Fetch latest from the configured update remote (network call, cached by TTL)
     if fetch:
-        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+        _, fetch_ok = _run_git(['fetch', _update_remote(), '--quiet'], path, timeout=15)
         if not fetch_ok:
             return {'name': name, 'behind': 0, 'error': 'fetch failed'}
 
@@ -591,7 +611,7 @@ def _check_repo_branch(path, name, *, fetch=True):
         compare_ref = upstream
     else:
         branch = _detect_default_branch(path)
-        compare_ref = f'origin/{branch}'
+        compare_ref = f'{_update_remote()}/{branch}'
 
     # Count commits behind
     out, ok = _run_git(['rev-list', '--count', f'HEAD..{compare_ref}'], path)
@@ -629,7 +649,7 @@ def _check_repo_branch(path, name, *, fetch=True):
     latest, _ = _run_git(['rev-parse', '--short', compare_ref], path)
 
     # Get repo URL for "What's new?" link
-    remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
+    remote_url, _ = _run_git(['remote', 'get-url', _update_remote()], path)
     remote_url = _normalize_remote_url(remote_url)
 
     return {
@@ -672,7 +692,7 @@ def _check_repo(path, name):
     # after a squash-merge that re-points a release tag at a new SHA) jams
     # the update path indefinitely with "would clobber existing tag" errors.
     # See #2756.
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', _update_remote(), '--tags', '--force'], path, timeout=15)
     if not fetch_ok:
         release_info = _check_repo_release(path, name)
         message = 'fetch failed'
@@ -1233,7 +1253,7 @@ def apply_force_update(target: str) -> dict:
         # --force so a remote re-tag (e.g. squash-merge that re-points an
         # existing release tag) doesn't jam the apply path with "would clobber
         # existing tag". See #2756.
-        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+        _, fetch_ok = _run_git(['fetch', _update_remote(), '--quiet', '--tags', '--force'], path, timeout=15)
         if not fetch_ok:
             return {
                 'ok': False,
@@ -1291,7 +1311,7 @@ def _apply_update_inner(target):
 
     # Fetch before attempting pull, so the remote ref is current.
     # --force so a remote re-tag doesn't block the update path (see #2756).
-    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    _, fetch_ok = _run_git(['fetch', _update_remote(), '--quiet', '--tags', '--force'], path, timeout=15)
     if not fetch_ok:
         return {
             'ok': False,
@@ -1338,7 +1358,7 @@ def _apply_update_inner(target):
     if remote:
         pull_args.extend([remote, branch])
     else:
-        pull_args.extend(['origin', compare_ref])
+        pull_args.extend([_update_remote(), compare_ref])
     pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
     if not pull_ok:
         pull_lower = pull_out.lower()
@@ -1411,7 +1431,7 @@ def _apply_update_inner(target):
             if restored_note:
                 message_parts.append(restored_note)
             message_parts.append(
-                'Run: git -C ' + str(path) + ' fetch origin && '
+                'Run: git -C ' + str(path) + ' fetch ' + _update_remote() + ' && '
                 'git -C ' + str(path) + ' reset --hard ' + compare_ref
             )
             return {
