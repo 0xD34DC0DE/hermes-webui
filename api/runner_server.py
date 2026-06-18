@@ -694,3 +694,75 @@ def _register_test_store(store: RunStore) -> None:
     """Tests call this from a fixture to expose ``get_run`` globally."""
     global _LAST_STORE
     _LAST_STORE = store
+
+
+# ── CLI entry point ───────────────────────────────────────────────────────
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """Entry point for ``python -m api.runner_server``.
+
+    Reads bind host/port from CLI flags (``--host``, ``--port``) or
+    falls back to the ``HERMES_WEBUI_RUNNER_HOST`` /
+    ``HERMES_WEBUI_RUNNER_PORT`` env vars (which ``start-runner.ps1``
+    sets). Writes ``runner.pid`` after bind so ``restart.ps1`` can
+    manage the lifecycle.
+
+    Returns the exit code from ``serve_forever`` (always 0 under
+    normal shutdown; SIGINT gives 130).
+    """
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="api.runner_server",
+        description="Hermes WebUI Runner server (out-of-process AIAgent host).",
+    )
+    parser.add_argument("--host", default=os.environ.get("HERMES_WEBUI_RUNNER_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("HERMES_WEBUI_RUNNER_PORT", "8788") or "8788"))
+    parser.add_argument("--state-dir", default=os.environ.get("HERMES_WEBUI_STATE_DIR"))
+    args = parser.parse_args(argv)
+
+    server, _store = make_server(host=args.host, port=args.port)
+    actual_host, actual_port = server.server_address[:2]
+
+    # Write runner.pid (JSON, matches server.pid shape but with role=runner).
+    if args.state_dir:
+        from pathlib import Path
+        pid_path = Path(args.state_dir) / "runner.pid"
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "pid": os.getpid(),
+            "port": actual_port,
+            "host": actual_host,
+            "started_at": time.time(),
+            "role": "runner",
+        }
+        import json as _json
+        tmp = pid_path.with_suffix(".pid.tmp")
+        tmp.write_text(_json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, pid_path)
+
+    print(f"[runner] Hermes WebUI Runner listening on http://{actual_host}:{actual_port}", flush=True)
+    try:
+        server.serve_forever()
+        return 0
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        try:
+            server.server_close()
+        except Exception:
+            pass
+        if args.state_dir:
+            try:
+                from pathlib import Path
+                pid_path = Path(args.state_dir) / "runner.pid"
+                if pid_path.exists():
+                    payload = json.loads(pid_path.read_text(encoding="utf-8"))
+                    if int(payload.get("pid") or -1) == os.getpid():
+                        pid_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

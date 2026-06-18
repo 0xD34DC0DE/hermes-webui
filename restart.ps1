@@ -43,7 +43,8 @@
 [CmdletBinding()]
 param(
     [int]$GraceSeconds = 4,
-    [int]$PortTimeout = 15
+    [int]$PortTimeout = 15,
+    [switch]$WithRunner = $false
 )
 
 $ErrorActionPreference = 'Stop'
@@ -189,4 +190,69 @@ $proc = Start-Process -FilePath 'powershell.exe' `
 Write-Host "[restart.ps1] Launched detached start.ps1 (pwsh pid=$($proc.Id))" -ForegroundColor Cyan
 Write-Host "[restart.ps1] New server PID will appear in $pidFile once it binds."
 Write-Host "[restart.ps1] Watch with: Get-Content '$pidFile' -Wait"
+
+# === Optional runner restart (Phase 2) ===================================
+# When -WithRunner is passed, also SIGINT the old runner, wait for its
+# port to free, and launch a detached start-runner.ps1 in a fresh
+# PowerShell. The new runner inherits the same HERMES_HOME /
+# HERMES_WEBUI_STATE_DIR / HERMES_WEBUI_RUNNER_PORT as the WebUI so the
+# WebUI's runtime-adapter can find it on the same URL after restart.
+#
+# This is intentionally the LAST step. Order matters: the runner must
+# be alive before the WebUI comes back up, otherwise the WebUI's
+# runtime-adapter (set to runner-local) would reject requests until it
+# does. The WebUI's existing client-side retry on a runner outage
+# covers the brief gap during a real outage, but a planned restart
+# should never leave the WebUI pointing at a dead runner.
+if ($WithRunner) {
+    $runnerPidFile = Join-Path $env:HERMES_WEBUI_STATE_DIR 'runner.pid'
+    $runnerScript = Join-Path $RepoRoot 'start-runner.ps1'
+
+    if (Test-Path $runnerPidFile) {
+        try {
+            $runnerPayload = Get-Content $runnerPidFile -Raw | ConvertFrom-Json -ErrorAction Stop
+            $runnerPid = [int]$runnerPayload.pid
+            $runnerPort = [int]$runnerPayload.port
+            $runnerHost = if ($runnerPayload.host) { [string]$runnerPayload.host } else { '127.0.0.1' }
+            Write-Host "[restart.ps1] Stopping old runner pid=$runnerPid ${runnerHost}:${runnerPort}" -ForegroundColor Cyan
+            try {
+                Stop-Process -Id $runnerPid -SignalKind Interrupt -ErrorAction Stop
+            } catch {
+                Write-Host "[restart.ps1] Old runner $runnerPid not running: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+            # Wait for runner port to free.
+            $deadline = (Get-Date).AddSeconds($PortTimeout)
+            $portFree = $false
+            while ((Get-Date) -lt $deadline) {
+                try {
+                    $tcp = [System.Net.Sockets.TcpClient]::new()
+                    $iar = $tcp.BeginConnect($runnerHost, $runnerPort, $null, $null)
+                    $ok = $iar.AsyncWaitHandle.WaitOne(200)
+                    if (-not $ok) { $tcp.Close() }
+                    else { $tcp.EndConnect($iar); $tcp.Close() }
+                } catch { $portFree = $true; break }
+                Start-Sleep -Milliseconds 100
+            }
+            if (-not $portFree) {
+                Write-Host "[restart.ps1] WARN: runner port still bound after $PortTimeout s -- continuing anyway." -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "[restart.ps1] Could not parse runner.pid: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "[restart.ps1] No runner.pid at $runnerPidFile -- assuming no runner was running." -ForegroundColor Yellow
+    }
+
+    if (Test-Path $runnerScript) {
+        $runnerPwshArgs = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runnerScript)
+        $rproc = Start-Process -FilePath 'powershell.exe' `
+                                -ArgumentList $runnerPwshArgs `
+                                -WindowStyle Hidden `
+                                -PassThru
+        Write-Host "[restart.ps1] Launched detached start-runner.ps1 (pwsh pid=$($rproc.Id))" -ForegroundColor Cyan
+    } else {
+        Write-Host "[restart.ps1] WARN: $runnerScript not found -- skipping runner relaunch." -ForegroundColor Yellow
+    }
+}
+
 exit 0

@@ -49,7 +49,8 @@
 [CmdletBinding()]
 param(
     [int]$Port = 0,
-    [string]$BindHost = ''
+    [string]$BindHost = '',
+    [switch]$WithRunner = $false
 )
 
 $ErrorActionPreference = 'Stop'
@@ -173,6 +174,76 @@ if (-not $env:HERMES_WEBUI_STATE_DIR) {
 # === Ensure dirs exist =================================================
 New-Item -ItemType Directory -Force -Path $env:HERMES_HOME | Out-Null
 New-Item -ItemType Directory -Force -Path $env:HERMES_WEBUI_STATE_DIR | Out-Null
+
+# === Optional runner launch (Phase 2) ====================================
+# When -WithRunner is passed, launch the out-of-process AIAgent runner in
+# a detached PowerShell window before the WebUI. The runner binds to
+# HERMES_WEBUI_RUNNER_PORT (default 8788), distinct from the WebUI's
+# HERMES_WEBUI_PORT (default 8787). Once the runner's port is reachable
+# we set HERMES_WEBUI_RUNNER_BASE_URL and HERMES_WEBUI_RUNTIME_ADAPTER so
+# the WebUI's runtime-adapter routes chat turns through the runner.
+#
+# Why detached: the runner is a long-lived process. If we launched it
+# in the same PowerShell session, a Ctrl-C in the console would kill
+# both. Detaching via Start-Process -WindowStyle Hidden makes the
+# runner survive this script's exit, matching the production
+# separation-of-concerns design.
+if ($WithRunner) {
+    $runnerScript = Join-Path $RepoRoot 'start-runner.ps1'
+    if (-not (Test-Path $runnerScript)) {
+        Write-Error "start-runner.ps1 not found at $runnerScript - Phase 2 launch requires the runner script."
+        exit 1
+    }
+    if (-not $env:HERMES_WEBUI_RUNNER_PORT) {
+        $env:HERMES_WEBUI_RUNNER_PORT = '8788'
+    }
+    if (-not $env:HERMES_WEBUI_RUNNER_HOST) {
+        $env:HERMES_WEBUI_RUNNER_HOST = '127.0.0.1'
+    }
+    if ([int]$env:HERMES_WEBUI_RUNNER_PORT -eq $PortFinal) {
+        Write-Error "HERMES_WEBUI_RUNNER_PORT=$($env:HERMES_WEBUI_RUNNER_PORT) collides with HERMES_WEBUI_PORT=$PortFinal. Pick distinct ports."
+        exit 1
+    }
+
+    Write-Host "[start.ps1] Launching runner on $($env:HERMES_WEBUI_RUNNER_HOST):$($env:HERMES_WEBUI_RUNNER_PORT)..." -ForegroundColor Cyan
+    $runnerProc = Start-Process -FilePath 'powershell.exe' `
+                                -ArgumentList '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', `
+                                              '-File', $runnerScript `
+                                -WindowStyle Hidden `
+                                -PassThru
+
+    # Wait for runner port to free up to (default) 15 seconds.
+    $runnerPort = [int]$env:HERMES_WEBUI_RUNNER_PORT
+    $runnerHost = $env:HERMES_WEBUI_RUNNER_HOST
+    $deadline = (Get-Date).AddSeconds(15)
+    $runnerUp = $false
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $tcp = [System.Net.Sockets.TcpClient]::new()
+            $iar = $tcp.BeginConnect($runnerHost, $runnerPort, $null, $null)
+            $ok = $iar.AsyncWaitHandle.WaitOne(200)
+            if ($ok) {
+                $tcp.EndConnect($iar); $tcp.Close(); $runnerUp = $true; break
+            }
+            $tcp.Close()
+        } catch {
+            $runnerUp = $true; break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $runnerUp) {
+        Write-Error "Runner failed to bind $($runnerHost):$($runnerPort) within 15s. Check runner.pid in $($env:HERMES_WEBUI_STATE_DIR)."
+        exit 1
+    }
+    Write-Host "[start.ps1] Runner is up (pwsh pid=$($runnerProc.Id))." -ForegroundColor Green
+
+    # Wire the WebUI to the runner via env vars before launch.
+    $env:HERMES_WEBUI_RUNNER_BASE_URL = "http://$($runnerHost):$($runnerPort)"
+    $env:HERMES_WEBUI_RUNTIME_ADAPTER = 'runner-local'
+    Write-Host "[start.ps1] HERMES_WEBUI_RUNNER_BASE_URL=$($env:HERMES_WEBUI_RUNNER_BASE_URL)"
+    Write-Host "[start.ps1] HERMES_WEBUI_RUNTIME_ADAPTER=runner-local"
+    Write-Host ""
+}
 
 # === Launch (foreground, matches start.sh) =============================
 Write-Host "[start.ps1] Hermes WebUI native Windows launcher" -ForegroundColor Cyan
