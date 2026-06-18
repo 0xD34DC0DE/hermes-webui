@@ -129,6 +129,14 @@ def test_tps_display_hot_applies_when_preferences_autosave():
     )
 
 
+def test_live_tps_metering_estimates_chunk_text_better_than_one_per_callback():
+    from api.streaming import _rough_stream_token_delta
+
+    assert _rough_stream_token_delta("") == 0
+    assert _rough_stream_token_delta("hello world") >= 2
+    assert _rough_stream_token_delta("streamed assistant output") >= 3
+
+
 def test_tps_header_rendering_respects_display_setting():
     assert "function isTpsDisplayEnabled()" in UI_JS, "TPS visibility should be centralized"
     assert "return window._showTps===true" in UI_JS, "TPS should only render when explicitly enabled"
