@@ -58,13 +58,15 @@ def _isolate_models_cache():
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
-def _resolve_with_config(model_id, provider=None, base_url=None):
+def _resolve_with_config(model_id, provider=None, base_url=None, default=None):
     old_cfg = dict(config.cfg)
     model_cfg = {}
     if provider:
         model_cfg['provider'] = provider
     if base_url:
         model_cfg['base_url'] = base_url
+    if default:
+        model_cfg['default'] = default
     config.cfg['model'] = model_cfg if model_cfg else {}
     try:
         return config.resolve_model_provider(model_id)
@@ -270,3 +272,47 @@ def test_minimax_slash_format_routes_openrouter_when_not_active():
     )
     assert model == 'minimax/MiniMax-M2.7'
     assert provider == 'openrouter'
+
+
+def test_empty_minimax_model_resolves_catalog_default():
+    """Empty model with minimax provider must not reach the agent as ''."""
+    model, provider, base_url = _resolve_with_config(
+        '', provider='minimax',
+    )
+    assert model == 'MiniMax-M3'
+    assert provider == 'minimax'
+
+
+def test_empty_minimax_model_uses_configured_default():
+    """Configured model.default wins over the static catalog fallback."""
+    model, provider, base_url = _resolve_with_config(
+        '', provider='minimax', default='MiniMax-M2.7',
+    )
+    assert model == 'MiniMax-M2.7'
+    assert provider == 'minimax'
+
+
+def test_resolve_model_provider_honors_config_data_override():
+    """Profile-scoped config_data must win over the ambient global cfg."""
+    old_cfg = dict(config.cfg)
+    config.cfg.clear()
+    config.cfg["model"] = {"provider": "openai", "default": "gpt-5.5"}
+    profile_cfg = {
+        "model": {
+            "provider": "minimax",
+            "default": "MiniMax-M2.7",
+            "base_url": "https://api.minimax.io/v1",
+        }
+    }
+    try:
+        model, provider, base_url = config.resolve_model_provider(
+            "",
+            config_data=profile_cfg,
+        )
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+    assert model == "MiniMax-M2.7"
+    assert provider == "minimax"
+    assert base_url == "https://api.minimax.io/v1"

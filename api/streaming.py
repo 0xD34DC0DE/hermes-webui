@@ -167,6 +167,17 @@ def _apply_profile_provider_context_to_streaming_model(
         return model, provider_context, False
 
     provider_context = profile_provider.lower()
+    if not str(model or "").strip():
+        from api.config import _configured_model_default, _provider_catalog_default_model
+
+        fallback_model = (
+            str(profile_default_model or "").strip()
+            or _provider_catalog_default_model(profile_provider)
+        )
+        if fallback_model:
+            return fallback_model, provider_context, True
+        return model, provider_context, False
+
     if not profile_default_model:
         return model, provider_context, False
 
@@ -6496,12 +6507,42 @@ def _run_agent_streaming(
             if _AIAgent is None:
                 raise ImportError(_aiagent_import_error_detail())
 
+            # Read per-profile config at call time (not module-level snapshot).
+            # The streaming worker is a detached thread that does NOT inherit the
+            # per-request thread-local profile context, so the ambient
+            # get_config() would resolve the process-global (default) profile and
+            # leak the wrong profile's toolsets / prefill / fallback config into
+            # this run (issue #3294). Read the SESSION's own profile home
+            # explicitly so toolsets and context match the profile the session
+            # actually runs under.
+            from api.config import get_config_for_profile_home as _get_config_for_home
+            try:
+                _cfg = _get_config_for_home(_profile_home)
+            except Exception:
+                from api.config import get_config as _get_config
+                _cfg = _get_config()
+
             # Initialize SessionDB so session_search works in WebUI sessions
             _state_db_path = (Path(_profile_home) / "state.db") if _profile_home else None
             _session_db = _build_session_db_for_stream(_state_db_path)
             resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-                model_with_provider_context(model, provider_context)
+                model_with_provider_context(
+                    model,
+                    provider_context,
+                    config_data=_cfg,
+                ),
+                config_data=_cfg,
             )
+            from api.config import (
+                _coerce_model_away_from_provider_slug,
+                _configured_model_default,
+            )
+            resolved_model = _coerce_model_away_from_provider_slug(
+                resolved_model,
+                resolved_provider,
+            )
+            if not str(resolved_model or "").strip():
+                resolved_model = _configured_model_default(_cfg, resolved_provider)
             configured_base_url = resolved_base_url
 
             # Resolve API key via Hermes runtime provider (matches gateway behaviour).
@@ -6531,20 +6572,6 @@ def _run_agent_streaming(
                 resolved_provider, resolved_api_key, resolved_base_url
             )
 
-            # Read per-profile config at call time (not module-level snapshot).
-            # The streaming worker is a detached thread that does NOT inherit the
-            # per-request thread-local profile context, so the ambient
-            # get_config() would resolve the process-global (default) profile and
-            # leak the wrong profile's toolsets / prefill / fallback config into
-            # this run (issue #3294). Read the SESSION's own profile home
-            # explicitly so toolsets and context match the profile the session
-            # actually runs under.
-            from api.config import get_config_for_profile_home as _get_config_for_home
-            try:
-                _cfg = _get_config_for_home(_profile_home)
-            except Exception:
-                from api.config import get_config as _get_config
-                _cfg = _get_config()
             _prefill_context = _load_webui_prefill_context(_cfg)
             _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
             _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)
@@ -6873,6 +6900,22 @@ def _run_agent_streaming(
                         agent._interrupted = False
                     if hasattr(agent, '_interrupt_message'):
                         agent._interrupt_message = None
+                    _sync_model = str(_agent_kwargs.get('model') or '').strip()
+                    _cached_model = str(getattr(agent, 'model', '') or '').strip()
+                    if _sync_model and _sync_model != _cached_model:
+                        if hasattr(agent, 'switch_model'):
+                            try:
+                                agent.switch_model(
+                                    _sync_model,
+                                    _agent_kwargs.get('provider') or getattr(agent, 'provider', None),
+                                    api_key=_agent_kwargs.get('api_key') or getattr(agent, 'api_key', None),
+                                    base_url=_agent_kwargs.get('base_url') or getattr(agent, 'base_url', None),
+                                    api_mode=_agent_kwargs.get('api_mode') or getattr(agent, 'api_mode', None),
+                                )
+                            except Exception:
+                                agent.model = _sync_model
+                        else:
+                            agent.model = _sync_model
                 else:
                     agent = _AIAgent(**_agent_kwargs)
                     # Register the new agent with the memory lifecycle so

@@ -2094,6 +2094,7 @@ from api.config import (
     reload_config,
     _cfg_lock,
     PENDING_BG_TASK_COMPLETIONS,
+    _provider_catalog_default_model,
 )
 from api.helpers import (
     require,
@@ -3680,7 +3681,11 @@ def _resolve_compatible_session_model_state(
         _profile_provider_normalized = _normalize_provider_id(profile_provider)
         _profile_default = str(profile_default_model or "").strip()
         if not model:
-            _fallback = _profile_default or default_model
+            _fallback = (
+                _profile_default
+                or default_model
+                or _provider_catalog_default_model(profile_provider)
+            )
             return _fallback, profile_provider, bool(_fallback)
 
         model_prefix = model.split("/", 1)[0].strip().lower() if "/" in model else ""
@@ -3722,7 +3727,12 @@ def _resolve_compatible_session_model_state(
         return model, profile_provider, False
 
     if not model:
-        return default_model, requested_provider, bool(default_model)
+        catalog_provider = str(catalog.get("active_provider") or "").strip() or None
+        effective_model = (
+            default_model
+            or _provider_catalog_default_model(requested_provider or catalog_provider)
+        )
+        return effective_model, requested_provider, bool(effective_model)
 
     active_provider = _normalize_provider_id(catalog.get("active_provider"))
     # Also keep the raw active_provider slug for cross-provider detection with

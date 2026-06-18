@@ -95,12 +95,21 @@ def test_bare_model_uses_config_provider():
 
 
 def test_empty_model_returns_config_defaults():
-    """Empty model string returns config provider and base_url."""
+    """Empty model string falls back to configured default or provider catalog."""
     model, provider, base_url = _resolve_with_config(
-        '', provider='anthropic',
+        '', provider='anthropic', default='claude-sonnet-4.6',
     )
-    assert model == ''
+    assert model == 'claude-sonnet-4.6'
     assert provider == 'anthropic'
+
+
+def test_empty_model_uses_provider_catalog_when_no_default():
+    """MiniMax with no model.default still resolves a concrete model id."""
+    model, provider, base_url = _resolve_with_config(
+        '', provider='minimax',
+    )
+    assert model == 'MiniMax-M3'
+    assert provider == 'minimax'
 
 
 # ── @provider:model hint routing (Issue #138 v2) ────────────────────────
@@ -748,3 +757,15 @@ def test_bare_custom_provider_no_base_url_with_known_prefix_keeps_custom_and_ful
     )
     assert model == 'google/gemma-2-9b'
     assert base_url is None
+
+
+def test_provider_slug_model_coerces_to_catalog_default():
+    """A bare provider slug must not be sent to the API as the model id."""
+    model, provider, base_url = _resolve_with_config(
+        'minimax',
+        provider='minimax',
+        default='MiniMax-M3',
+        base_url='https://api.minimax.io/anthropic',
+    )
+    assert provider == 'minimax'
+    assert model == 'MiniMax-M3'

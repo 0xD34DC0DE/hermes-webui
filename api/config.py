@@ -2017,7 +2017,7 @@ def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
     return False
 
 
-def _get_provider_base_url(provider_id):
+def _get_provider_base_url(provider_id, config_data: dict | None = None):
     """Look up the configured base_url for a provider (e.g. lmstudio).
 
     Checks two locations, in order:
@@ -2030,11 +2030,12 @@ def _get_provider_base_url(provider_id):
 
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    prov_cfg = _get_provider_cfg(provider_id)
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    prov_cfg = _get_provider_cfg(provider_id, active_cfg)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
-    model_cfg = cfg.get("model", {}) or {}
+    model_cfg = active_cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
         if model_provider == str(provider_id).strip().lower():
@@ -2044,17 +2045,79 @@ def _get_provider_base_url(provider_id):
     return None
 
 
-def _get_providers_cfg() -> dict:
-    providers_cfg = cfg.get("providers")
+def _get_providers_cfg(config_data: dict | None = None) -> dict:
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    providers_cfg = active_cfg.get("providers")
     return providers_cfg if isinstance(providers_cfg, dict) else {}
 
 
-def _get_provider_cfg(provider_id) -> dict:
-    provider_cfg = _get_providers_cfg().get(provider_id, {})
+def _get_provider_cfg(provider_id, config_data: dict | None = None) -> dict:
+    provider_cfg = _get_providers_cfg(config_data).get(provider_id, {})
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
-def resolve_model_provider(model_id: str) -> tuple:
+def _model_default_looks_like_provider_id(model_id: str) -> bool:
+    """True when ``model.default`` is actually a provider slug (#1568)."""
+    candidate = str(model_id or "").strip().lower().replace("_", "-")
+    if not candidate:
+        return False
+    return (
+        candidate in _PROVIDER_DISPLAY
+        or _canonicalise_provider_id(candidate) in _PROVIDER_DISPLAY
+    )
+
+
+def _coerce_model_away_from_provider_slug(
+    model_id: str | None,
+    provider_id: str | None,
+) -> str:
+    """Replace a bare provider slug mistaken for a model id with a catalog default."""
+    model = str(model_id or "").strip()
+    if not model:
+        return ""
+    provider = _canonicalise_provider_id(provider_id)
+    model_as_provider = _canonicalise_provider_id(model)
+    if provider and model_as_provider == provider:
+        return _provider_catalog_default_model(provider) or model
+    if _model_default_looks_like_provider_id(model):
+        return _provider_catalog_default_model(model_as_provider or model) or model
+    return model
+
+
+def _provider_catalog_default_model(provider_id: str | None) -> str:
+    """Return the first static-catalog model id for *provider_id*, if any."""
+    pid = _canonicalise_provider_id(provider_id)
+    if not pid:
+        return ""
+    catalog = _PROVIDER_MODELS.get(pid)
+    if not isinstance(catalog, list):
+        return ""
+    for entry in catalog:
+        if isinstance(entry, dict):
+            model_id = str(entry.get("id") or "").strip()
+            if model_id:
+                return model_id
+    return ""
+
+
+def _configured_model_default(config_data: dict | None = None, provider_id: str | None = None) -> str:
+    """Resolve a usable default model from config/env, then provider catalog."""
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    model_cfg = active_cfg.get("model", {}) if isinstance(active_cfg, dict) else {}
+    if isinstance(model_cfg, dict):
+        cfg_default = str(model_cfg.get("default") or "").strip()
+        if cfg_default and not _model_default_looks_like_provider_id(cfg_default):
+            return cfg_default
+    env_default = get_effective_default_model(active_cfg)
+    if env_default and not _model_default_looks_like_provider_id(env_default):
+        return env_default
+    provider_hint = provider_id
+    if not provider_hint and isinstance(model_cfg, dict):
+        provider_hint = model_cfg.get("provider")
+    return _provider_catalog_default_model(provider_hint)
+
+
+def resolve_model_provider(model_id: str, *, config_data: dict | None = None) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
     Model IDs from the dropdown can be in several formats:
@@ -2075,14 +2138,15 @@ def resolve_model_provider(model_id: str) -> tuple:
 
     Returns (model, provider, base_url) where provider and base_url may be None.
     """
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
     config_provider = None
     config_base_url = None
-    model_cfg = cfg.get("model", {})
+    model_cfg = active_cfg.get("model", {})
     if isinstance(model_cfg, dict):
         config_base_url = model_cfg.get("base_url")
         config_provider = _resolve_configured_provider_id(
             model_cfg.get("provider"),
-            cfg,
+            active_cfg,
             base_url=config_base_url,
             resolve_alias=False,
         )
@@ -2099,6 +2163,8 @@ def resolve_model_provider(model_id: str) -> tuple:
 
     model_id = (model_id or "").strip()
     if not model_id:
+        model_id = _configured_model_default(active_cfg, config_provider)
+        model_id = _coerce_model_away_from_provider_slug(model_id, config_provider)
         return model_id, config_provider, config_base_url
 
     # Custom providers declared in config.yaml should win over slash-based
@@ -2136,7 +2202,7 @@ def resolve_model_provider(model_id: str) -> tuple:
             or model_id in _provider_models_set
         )
     )
-    custom_providers = cfg.get('custom_providers', [])
+    custom_providers = active_cfg.get('custom_providers', [])
     if isinstance(custom_providers, list) and not _skip_custom_providers:
         for entry in custom_providers:
             if not isinstance(entry, dict):
@@ -2198,7 +2264,9 @@ def resolve_model_provider(model_id: str) -> tuple:
             and provider_hint.lower() in _custom_endpoint_slugs_for_base_url(config_base_url)
         ):
             return bare_model, config_provider, config_base_url
-        return bare_model, provider_hint, _get_provider_base_url(provider_hint)
+        if not bare_model:
+            bare_model = _configured_model_default(active_cfg, provider_hint)
+        return bare_model, provider_hint, _get_provider_base_url(provider_hint, active_cfg)
 
     if "/" in model_id:
         prefix, bare = model_id.split("/", 1)
@@ -2220,7 +2288,12 @@ def resolve_model_provider(model_id: str) -> tuple:
         # If prefix matches config provider exactly, strip it and use that provider directly.
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
         if config_provider and prefix == config_provider:
-            return bare, config_provider, config_base_url
+            if bare:
+                return bare, config_provider, config_base_url
+            fallback_model = _configured_model_default(active_cfg, config_provider)
+            if fallback_model:
+                return fallback_model, config_provider, config_base_url
+            return model_id, config_provider, config_base_url
         # The OpenAI Codex provider uses a real base_url, but its default
         # ChatGPT endpoint cannot serve OpenRouter-style provider/model IDs.
         # Keep that narrow exception before the custom endpoint protection so
@@ -2240,7 +2313,7 @@ def resolve_model_provider(model_id: str) -> tuple:
         # instead of falling back to the default config provider. MUST come BEFORE
         # the config_base_url branch because many providers have a base_url set.
         if prefix and config_provider and prefix != config_provider:
-            _custom_cfg = cfg.get("custom_providers", [])
+            _custom_cfg = active_cfg.get("custom_providers", [])
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
@@ -2308,6 +2381,9 @@ def resolve_model_provider(model_id: str) -> tuple:
         if prefix in _PROVIDER_MODELS and prefix != config_provider and not _is_custom_cross:
             return model_id, "openrouter", None
 
+    model_id = _coerce_model_away_from_provider_slug(model_id, config_provider)
+    if not model_id:
+        model_id = _configured_model_default(active_cfg, config_provider)
     return model_id, config_provider, config_base_url
 
 
@@ -2415,7 +2491,12 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
 _ACP_SUBPROCESS_PROVIDERS = frozenset({"cursor-acp", "copilot-acp"})
 
 
-def model_with_provider_context(model_id: str, model_provider: str | None = None) -> str:
+def model_with_provider_context(
+    model_id: str,
+    model_provider: str | None = None,
+    *,
+    config_data: dict | None = None,
+) -> str:
     """Return the model string to pass to ``resolve_model_provider()``.
 
     Session persistence keeps the user's selected provider in ``model_provider``
@@ -2429,7 +2510,8 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     if not model or not provider or provider == "default" or model.startswith("@"):
         return model
 
-    model_cfg = cfg.get("model", {})
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    model_cfg = active_cfg.get("model", {})
     config_provider = None
     if isinstance(model_cfg, dict):
         config_provider = str(model_cfg.get("provider") or "").strip().lower()

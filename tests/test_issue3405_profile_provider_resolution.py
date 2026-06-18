@@ -235,6 +235,27 @@ class TestProfileProviderResolution:
         assert result[1] == "anthropic"
         assert result[2] is True
 
+    def test_empty_model_with_profile_and_no_defaults_uses_provider_catalog(self):
+        """Empty model + minimax profile with no defaults uses static catalog."""
+        from api.routes import _resolve_compatible_session_model_state
+
+        with patch("api.routes.get_available_models") as mock_catalog:
+            mock_catalog.return_value = {
+                "active_provider": "copilot",
+                "default_model": "",
+                "groups": [],
+            }
+            result = _resolve_compatible_session_model_state(
+                "",
+                None,
+                profile_provider="minimax",
+                profile_default_model=None,
+            )
+
+        assert result[0] == "MiniMax-M3"
+        assert result[1] == "minimax"
+        assert result[2] is True
+
     def test_gemini_model_under_openai_profile_repairs(self):
         """gemini-2.5-pro under openai profile repairs to profile default."""
         from api.routes import _resolve_compatible_session_model_state
@@ -427,6 +448,20 @@ class TestStreamingWorkerEnrichment:
 
         assert model == "claude-sonnet-4.6"
         assert provider_context == "anthropic"
+
+    def test_streaming_fills_empty_model_from_profile_provider_catalog(self):
+        from api.streaming import _apply_profile_provider_context_to_streaming_model
+
+        model, provider_context, changed = _apply_profile_provider_context_to_streaming_model(
+            "",
+            None,
+            "minimax",
+            None,
+        )
+
+        assert model == "MiniMax-M3"
+        assert provider_context == "minimax"
+        assert changed is True
 
     def test_explicit_provider_context_skips_profile_enrichment(self):
         """When provider_context is already set (explicit provider), the
