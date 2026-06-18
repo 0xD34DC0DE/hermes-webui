@@ -7574,6 +7574,20 @@ function _setAssistantTurnTps(turn, tpsText=''){
 }
 function _setLiveAssistantTps(value){
   _setAssistantTurnTps($('liveAssistantTurn'), isTpsDisplayEnabled()?_formatTurnTps(value):'');
+  // Mirror the live TPS into the composer footer chip so users can read
+  // throughput at a glance without scrolling back to the message header.
+  // Same hide-on-empty semantics as the header chip — no placeholder text.
+  const chip=$('composerTpsChip');
+  if(chip){
+    const text=(isTpsDisplayEnabled()&&value!=null)?_formatTurnTps(value):'';
+    if(text){
+      chip.textContent=text;
+      chip.style.display='';
+    } else {
+      chip.textContent='';
+      chip.style.display='none';
+    }
+  }
 }
 function _createAssistantTurn(tsTitle='', tpsText=''){
   const row=document.createElement('div');

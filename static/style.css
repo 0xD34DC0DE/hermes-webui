@@ -4841,6 +4841,27 @@ main.main > #mainPlugin{display:none;}
   font-variant-numeric: tabular-nums;
   line-height: 1.4;
 }
+/* Footer mirror of the header TPS chip — sits in .composer-right next to the
+   ctx indicator so live throughput is glanceable without scrolling to the
+   message header. Same visual language as .msg-tps-inline; owned by the
+   footer for layout/spacing tweaks without touching the header chip. */
+.composer-tps-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+@media (max-width: 700px) {
+  .composer-tps-chip { font-size: 10px; padding: 1px 5px; }
+}
 .msg-time { opacity: .65; font-size: 10px; }
 .msg-role:hover .msg-time { opacity: 1; }
 
