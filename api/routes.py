@@ -6859,6 +6859,116 @@ def _handle_shutdown(handler) -> bool:
     return True
 
 
+# Maximum grace window (seconds) the /api/server/restart handler will honour.
+# Caps how long an operator can keep the server alive mid-restart -- beyond 30s
+# you should just shut it down manually. Mirrors the kind of guard the
+# shutdown handler implicitly has via the existing 0.3s sleep.
+_RESTART_MAX_GRACE_SECONDS = 30
+_RESTART_DEFAULT_GRACE_SECONDS = 2
+
+
+def _handle_restart(handler) -> bool:
+    """Schedule a graceful server restart.
+
+    Mirrors ``_handle_shutdown`` but with two differences:
+
+      1. The endpoint records its intent in the process-wide state machine
+         (``api.server_lifecycle._state``) so the frontend can render a
+         reconnect banner via ``GET /api/server/restart/status``.
+      2. After the SIGINT the server exits cleanly; ``restart.ps1`` (or the
+         operator) is responsible for spawning the replacement. Phase 1
+         intentionally does NOT relaunch from inside the dying process
+         because every Windows port-handoff pattern we have audited wants a
+         fresh PID before the next bind attempt, and a child process spawned
+         from inside a ``finally`` block has no chance to outlive its
+         parent reliably across Windows job groups.
+
+    Body (optional JSON): ``{"grace_seconds": <0..30>}``. Default 2.
+    Returns 202 Accepted so the frontend can show "restarting..." immediately
+    even though the SIGINT is delayed by ``grace_seconds``.
+    """
+    headers = getattr(handler, "headers", {})
+    ua = headers.get("User-Agent", "no-ua") if hasattr(headers, "get") else "no-ua"
+    remote = "unknown"
+    if getattr(handler, "client_address", None):
+        remote = getattr(handler, "client_address", ("unknown",))[0]
+    logger.info(
+        "[restart-request] remote=%s method=%s path=%s ua=%s",
+        _shutdown_log_value(remote),
+        _shutdown_log_value(getattr(handler, "command", None)),
+        _shutdown_log_value(getattr(handler, "path", None), max_len=240),
+        _shutdown_log_value(ua, default="no-ua", max_len=240),
+    )
+
+    grace = _RESTART_DEFAULT_GRACE_SECONDS
+    try:
+        body = read_body(handler)
+        if isinstance(body, dict):
+            raw = body.get("grace_seconds")
+            if raw is not None:
+                grace = max(0, min(_RESTART_MAX_GRACE_SECONDS, int(raw)))
+    except Exception:
+        # Body parse failure is non-fatal; we honour the default grace.
+        pass
+
+    from datetime import datetime, timezone
+    from api.config import PORT
+    from api.server_lifecycle import set_state, get_state
+
+    set_state(
+        state="scheduled",
+        restarts_at=datetime.now(timezone.utc).isoformat(),
+        old_pid=os.getpid(),
+        new_pid=None,
+        port=int(PORT),
+        last_error=None,
+    )
+
+    j(
+        handler,
+        {
+            "status": "scheduled",
+            "state": get_state()["state"],
+            "restarts_in_seconds": grace,
+            "grace_seconds": grace,
+            "reconnect_url": "/",
+            "status_url": "/api/server/restart/status",
+        },
+        status=202,
+    )
+
+    import signal as _signal
+
+    def _do_restart():
+        import time as _time
+        _time.sleep(max(0, grace))
+        try:
+            from api.server_lifecycle import set_state
+            set_state(state="shutting_down")
+        except Exception:
+            pass
+        try:
+            os.kill(os.getpid(), _signal.SIGINT)
+        except Exception:
+            # If we cannot signal ourselves, the server is already gone.
+            pass
+
+    threading.Thread(target=_do_restart, daemon=True).start()
+    return True
+
+
+def _handle_restart_status(handler) -> bool:
+    """Return the current restart-state machine snapshot.
+
+    Pure read path. No state mutation. Safe to poll at any cadence; the
+    frontend is expected to poll at 1-2s while ``state == "scheduled"``
+    or ``"shutting_down"`` and back off to 5-10s once ``"back"`` arrives.
+    """
+    from api.server_lifecycle import get_state
+    j(handler, get_state())
+    return True
+
+
 def _serve_manifest(handler) -> bool:
     """Serve static/manifest.json with the correct PWA Content-Type.
 
@@ -7156,6 +7266,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/health":
         return _handle_health(handler, parsed)
+
+    if parsed.path == "/api/server/restart/status":
+        return _handle_restart_status(handler)
 
     if parsed.path == "/api/health/agent":
         payload = build_agent_health_payload()
@@ -8429,6 +8542,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)
+
+    if parsed.path == "/api/server/restart":
+        return _handle_restart(handler)
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)

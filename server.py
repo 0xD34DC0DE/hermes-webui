@@ -659,9 +659,32 @@ def main() -> None:
         print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
     print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
     print('', flush=True)
+    # ── Phase 1 graceful-restart: write server.pid after bind ────────────
+    # Written here (not earlier) so a failure to bind doesn't leave a stale
+    # PID file that restart.ps1 would later try to kill. The file is JSON,
+    # not raw int, so future fields (version, started_at, host) can be added
+    # without breaking existing restart.ps1 readers. Failure is non-fatal —
+    # a missing PID file just means restart.ps1 refuses to run, which is a
+    # safe failure mode (operator can fall back to manual stop/start).
+    try:
+        from api.server_lifecycle import write_pid_file
+        pid_path = write_pid_file()
+        print(f'[ok] Wrote server pid file: {pid_path}', flush=True)
+    except Exception as exc:
+        print(f'[!!] WARNING: could not write server.pid: {exc}', flush=True)
     try:
         httpd.serve_forever()
     finally:
+        # ── Phase 1 graceful-restart: clear server.pid on shutdown ───────
+        # Done before _log_shutdown_audit so the audit log can reference the
+        # PID file path that was just removed. Wrapped in try/except so a
+        # permission error on the file (e.g. another process holds it open)
+        # cannot block shutdown.
+        try:
+            from api.server_lifecycle import clear_pid_file
+            clear_pid_file()
+        except Exception:
+            logger.debug("Failed to clear server.pid during shutdown", exc_info=True)
         httpd.server_close()
         _log_shutdown_audit()
         # Stop the gateway watcher on shutdown

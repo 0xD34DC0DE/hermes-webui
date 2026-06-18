@@ -3,6 +3,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`POST /api/server/restart` for graceful WebUI restarts.** The endpoint
+  schedules a `SIGINT` after a configurable grace window (default 2s,
+  max 30s, body `{"grace_seconds": <0..30>}`) so the in-flight agent turn
+  has time to flush its SSE response. `restart.ps1` (the new PowerShell
+  launcher) reads `HERMES_WEBUI_STATE_DIR/server.pid`, sends `SIGINT` to
+  the old python, waits for the TCP port to free (15s default), then
+  launches a detached `start.ps1` in a brand-new PowerShell process.
+  Combined with `start.ps1`'s existing Windows bind retry
+  (`server.py:164`), full restarts complete in <3s on Windows and <1s
+  on Linux/macOS. Frontend can poll `GET /api/server/restart/status`
+  for a reconnect banner; the state machine exposes
+  `state ∈ {idle, scheduled, shutting_down, back}` plus
+  `restarts_at` / `old_pid` / `new_pid` / `port` / `updated_at`.
+  The PID file under `HERMES_WEBUI_STATE_DIR/server.pid` is JSON
+  (not raw int) so future fields can be added without breaking
+  existing readers.
+
 ## [v0.51.489] — 2026-06-18 — Release QY (outline button no longer collides with the scroll control)
 
 ### Fixed
